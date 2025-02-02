@@ -1,42 +1,45 @@
-﻿using System;
+﻿using Cysharp.Threading.Tasks;
+using JetBrains.Annotations;
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using VContainer.Diagnostics;
 using VContainer.Internal;
+using VContainer.Unity;
 
 namespace VContainer
 {
-    public interface IObjectResolver : IDisposable
+    public interface IObjectResolver : IUniTaskAsyncDisposable
     {
-        object ApplicationOrigin { get; }
         DiagnosticsCollector Diagnostics { get; set; }
 
         /// <summary>
-        /// Resolve from type
+        ///     Resolve from type
         /// </summary>
         /// <remarks>
-        /// This version of resolve looks for all of scopes
+        ///     This version of resolve looks for all of scopes
         /// </remarks>
         object Resolve(Type type);
 
         /// <summary>
-        /// Try resolve from type
+        ///     Try resolve from type
         /// </summary>
         /// <remarks>
-        /// This version of resolve looks for all of scopes
+        ///     This version of resolve looks for all of scopes
         /// </remarks>
         /// <returns>Successfully resolved</returns>
         bool TryResolve(Type type, out object resolved);
 
         /// <summary>
-        /// Resolve from meta with registration
+        ///     Resolve from meta with registration
         /// </summary>
         /// <remarks>
-        /// This version of resolve will look for instances from only the registration information already founds.
+        ///     This version of resolve will look for instances from only the registration information already founds.
         /// </remarks>
         object Resolve(Registration registration);
 
-        IScopedObjectResolver CreateScope(Action<IContainerBuilder> installation = null);
+        IScopedObjectResolver CreateScope([CanBeNull] ISceneReference scene, Action<IContainerBuilder> installation = null);
 
         void Inject(object instance);
         bool TryGetRegistration(Type type, out Registration registration);
@@ -59,43 +62,38 @@ namespace VContainer
     {
         public IObjectResolver Root { get; }
         public IScopedObjectResolver Parent { get; }
-        public object ApplicationOrigin { get; }
         public DiagnosticsCollector Diagnostics { get; set; }
 
-        readonly Registry registry;
-        readonly ConcurrentDictionary<Registration, Lazy<object>> sharedInstances = new ConcurrentDictionary<Registration, Lazy<object>>();
-        readonly CompositeDisposable disposables = new CompositeDisposable();
-        readonly Func<Registration, Lazy<object>> createInstance;
+        private readonly Registry registry;
+        private readonly ConcurrentDictionary<Registration, Lazy<object>> sharedInstances = new();
+        private readonly CompositeDisposable disposables = new();
+        private readonly Func<Registration, Lazy<object>> createInstance;
 
         internal ScopedContainer(
             Registry registry,
             IObjectResolver root,
-            IScopedObjectResolver parent = null,
-            object applicationOrigin = null)
+            [CanBeNull] IScopedObjectResolver parent)
         {
             Root = root;
             Parent = parent;
-            ApplicationOrigin = applicationOrigin;
             this.registry = registry;
-            createInstance = registration =>
-            {
-                return new Lazy<object>(() => registration.SpawnInstance(this));
-            };
+            createInstance = registration => { return new Lazy<object>(() => registration.SpawnInstance(this)); };
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public object Resolve(Type type)
         {
-            if (TryFindRegistration(type, out var registration))
+            if (TryFindRegistration(type, out Registration registration))
             {
                 return Resolve(registration);
             }
+
             throw new VContainerException(type, $"No such registration of type: {type}");
         }
 
         public bool TryResolve(Type type, out object resolved)
         {
-            if (TryFindRegistration(type, out var registration))
+            if (TryFindRegistration(type, out Registration registration))
             {
                 resolved = Resolve(registration);
                 return true;
@@ -112,16 +110,14 @@ namespace VContainer
             {
                 return Diagnostics.TraceResolve(registration, ResolveCore);
             }
+
             return ResolveCore(registration);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public IScopedObjectResolver CreateScope(Action<IContainerBuilder> installation = null)
+        public IScopedObjectResolver CreateScope([CanBeNull] ISceneReference scene, Action<IContainerBuilder> installation = null)
         {
-            var containerBuilder = new ScopedContainerBuilder(Root, this)
-            {
-                ApplicationOrigin = ApplicationOrigin
-            };
+            ScopedContainerBuilder containerBuilder = new(Root, this, scene);
             installation?.Invoke(containerBuilder);
             return containerBuilder.BuildScope();
         }
@@ -129,7 +125,7 @@ namespace VContainer
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Inject(object instance)
         {
-            var injector = InjectorCache.GetOrBuild(instance.GetType());
+            IInjector injector = InjectorCache.GetOrBuild(instance.GetType());
             injector.Inject(instance, this, null);
         }
 
@@ -137,28 +133,63 @@ namespace VContainer
         public bool TryGetRegistration(Type type, out Registration registration)
             => registry.TryGet(type, out registration);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Dispose()
+        public async UniTask DisposeAsync()
         {
-            if (Diagnostics != null)
+            List<Exception> exceptions = new();
+
+            try
             {
-                Diagnostics.Clear();
+                Diagnostics?.Clear();
             }
-            disposables.Dispose();
-            sharedInstances.Clear();
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            try
+            {
+                disposables.Dispose();
+            }
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            try
+            {
+                sharedInstances.Clear();
+            }
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            if (exceptions.Count == 1)
+            {
+                throw exceptions[0];
+            }
+
+            if (exceptions.Count > 1)
+            {
+                throw new AggregateException(exceptions);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        object ResolveCore(Registration registration)
+        private object ResolveCore(Registration registration)
         {
             switch (registration.Lifetime)
             {
                 case Lifetime.Singleton:
                     if (Parent is null)
+                    {
                         return Root.Resolve(registration);
+                    }
 
                     if (!registry.Exists(registration.ImplementationType))
+                    {
                         return Parent.Resolve(registration);
+                    }
 
                     return CreateTrackedInstance(registration);
 
@@ -171,7 +202,7 @@ namespace VContainer
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        object CreateTrackedInstance(Registration registration)
+        private object CreateTrackedInstance(Registration registration)
         {
             var lazy = sharedInstances.GetOrAdd(registration, createInstance);
             var created = lazy.IsValueCreated;
@@ -180,6 +211,7 @@ namespace VContainer
             {
                 disposables.Add(disposable);
             }
+
             return instance;
         }
 
@@ -193,6 +225,7 @@ namespace VContainer
                 {
                     return true;
                 }
+
                 scope = scope.Parent;
             }
 
@@ -203,42 +236,37 @@ namespace VContainer
 
     public sealed class Container : IObjectResolver
     {
-        public object ApplicationOrigin { get; }
         public DiagnosticsCollector Diagnostics { get; set; }
 
-        readonly Registry registry;
-        readonly IScopedObjectResolver rootScope;
-        readonly ConcurrentDictionary<Registration, Lazy<object>> sharedInstances = new ConcurrentDictionary<Registration, Lazy<object>>();
-        readonly CompositeDisposable disposables = new CompositeDisposable();
-        readonly Func<Registration, Lazy<object>> createInstance;
+        private readonly Registry registry;
+        private readonly IScopedObjectResolver rootScope;
+        private readonly ConcurrentDictionary<Registration, Lazy<object>> sharedInstances = new();
+        private readonly CompositeDisposable disposables = new();
+        private readonly Func<Registration, Lazy<object>> createInstance;
 
-        internal Container(Registry registry, object applicationOrigin = null)
+        internal Container(Registry registry)
         {
             this.registry = registry;
-            rootScope = new ScopedContainer(registry, this, applicationOrigin: applicationOrigin);
+            rootScope = new ScopedContainer(registry, this, null);
 
-            createInstance = registration =>
-            {
-                return new Lazy<object>(() => registration.SpawnInstance(this));
-            };
-
-            ApplicationOrigin = applicationOrigin;
+            createInstance = registration => { return new Lazy<object>(() => registration.SpawnInstance(this)); };
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public object Resolve(Type type)
         {
-            if (TryGetRegistration(type, out var registration))
+            if (TryGetRegistration(type, out Registration registration))
             {
                 return Resolve(registration);
             }
+
             throw new VContainerException(type, $"No such registration of type: {type}");
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve(Type type, out object resolved)
         {
-            if (TryGetRegistration(type, out var registration))
+            if (TryGetRegistration(type, out Registration registration))
             {
                 resolved = Resolve(registration);
                 return true;
@@ -255,17 +283,18 @@ namespace VContainer
             {
                 return Diagnostics.TraceResolve(registration, ResolveCore);
             }
+
             return ResolveCore(registration);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public IScopedObjectResolver CreateScope(Action<IContainerBuilder> installation = null)
-            => rootScope.CreateScope(installation);
+        public IScopedObjectResolver CreateScope([CanBeNull] ISceneReference scene, Action<IContainerBuilder> installation = null)
+            => rootScope.CreateScope(scene, installation);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Inject(object instance)
         {
-            var injector = InjectorCache.GetOrBuild(instance.GetType());
+            IInjector injector = InjectorCache.GetOrBuild(instance.GetType());
             injector.Inject(instance, this, null);
         }
 
@@ -273,29 +302,70 @@ namespace VContainer
         public bool TryGetRegistration(Type type, out Registration registration)
             => registry.TryGet(type, out registration);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Dispose()
+        public async UniTask DisposeAsync()
         {
-            if (Diagnostics != null)
+            List<Exception> exceptions = new();
+
+            try
             {
-                Diagnostics.Clear();
+                Diagnostics?.Clear();
             }
-            rootScope.Dispose();
-            disposables.Dispose();
-            sharedInstances.Clear();
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            try
+            {
+                await rootScope.DisposeAsync();
+            }
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            try
+            {
+                disposables.Dispose();
+            }
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            try
+            {
+                sharedInstances.Clear();
+            }
+            catch (Exception e)
+            {
+                exceptions.Add(e);
+            }
+
+            if (exceptions.Count == 1)
+            {
+                throw exceptions[0];
+            }
+
+            if (exceptions.Count > 1)
+            {
+                throw new AggregateException(exceptions);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        object ResolveCore(Registration registration)
+        private object ResolveCore(Registration registration)
         {
             switch (registration.Lifetime)
             {
                 case Lifetime.Singleton:
                     var singleton = sharedInstances.GetOrAdd(registration, createInstance);
-                    if (!singleton.IsValueCreated && singleton.Value is IDisposable disposable && !(registration.Provider is ExistingInstanceProvider))
+                    if (!singleton.IsValueCreated && singleton.Value is IDisposable disposable &&
+                        !(registration.Provider is ExistingInstanceProvider))
                     {
                         disposables.Add(disposable);
                     }
+
                     return singleton.Value;
 
                 case Lifetime.Scoped:
@@ -307,4 +377,3 @@ namespace VContainer
         }
     }
 }
-

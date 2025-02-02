@@ -102,10 +102,11 @@ namespace VContainer.Unity
             Quaternion rotation)
             where T : Component
         {
-            if (resolver.ApplicationOrigin is LifetimeScope scope)
+            //TODO: WHY??
+            /*if (resolver.ApplicationOrigin is LifetimeScope scope)
             {
                 return scope.Instantiate(prefab, position, rotation);
-            }
+            }*/
 
             return resolver.Instantiate(prefab, position, rotation, null);
         }
@@ -140,7 +141,7 @@ namespace VContainer.Unity
             }
         }
 
-        static T Instantiate<T>(this LifetimeScope scope, T prefab, Vector3 position, Quaternion rotation)
+        /*static T Instantiate<T>(this LifetimeScope scope, T prefab, Vector3 position, Quaternion rotation)
             where T : Component
         {
             var wasActive = prefab.gameObject.activeSelf;
@@ -214,7 +215,7 @@ namespace VContainer.Unity
         public static GameObject Instantiate(this IObjectResolver resolver, GameObject prefab)
         {
             return resolver.Instantiate(prefab, prefab.transform.position, prefab.transform.rotation);
-        }
+        }*/
 
         public static GameObject Instantiate(this IObjectResolver resolver, GameObject prefab, Transform parent, bool worldPositionStays = false)
         {
@@ -245,10 +246,11 @@ namespace VContainer.Unity
             Vector3 position,
             Quaternion rotation)
         {
-            if (resolver.ApplicationOrigin is LifetimeScope scope)
-            {
-                return scope.Instantiate(prefab, position, rotation);
-            }
+            //TODO: WHY??
+            //if (resolver.ApplicationOrigin is LifetimeScope scope)
+            //{
+            //    return scope.Instantiate(prefab, position, rotation);
+            //}
 
             return resolver.Instantiate(prefab, position, rotation, null);
         }

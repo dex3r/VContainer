@@ -1,6 +1,5 @@
 using System.Linq;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 
 namespace VContainer.Unity
 {
@@ -8,12 +7,6 @@ namespace VContainer.Unity
     {
         public static VContainerSettings Instance { get; private set; }
         public static bool DiagnosticsEnabled => Instance != null && Instance.EnableDiagnostics;
-
-        static LifetimeScope rootLifetimeScopeInstance;
-
-        [SerializeField]
-        [Tooltip("Set the Prefab to be the parent of the entire Project.")]
-        public LifetimeScope RootLifetimeScope;
 
         [SerializeField]
         [Tooltip("Enables the collection of information that can be viewed in the VContainerDiagnosticsWindow. Note: Performance degradation")]
@@ -67,42 +60,11 @@ namespace VContainer.Unity
         }
 #endif
 
-        public LifetimeScope GetOrCreateRootLifetimeScopeInstance()
-        {
-            if (RootLifetimeScope != null && rootLifetimeScopeInstance == null)
-            {
-                var activeBefore = RootLifetimeScope.gameObject.activeSelf;
-                RootLifetimeScope.gameObject.SetActive(false);
-
-                rootLifetimeScopeInstance = Instantiate(RootLifetimeScope);
-                SetName(rootLifetimeScopeInstance, RootLifetimeScope);
-                DontDestroyOnLoad(rootLifetimeScopeInstance);
-                rootLifetimeScopeInstance.gameObject.SetActive(true);
-
-                RootLifetimeScope.gameObject.SetActive(activeBefore);
-            }
-            return rootLifetimeScopeInstance;
-        }
-
-        public bool IsRootLifetimeScopeInstance(LifetimeScope lifetimeScope) =>
-            RootLifetimeScope == lifetimeScope || rootLifetimeScopeInstance == lifetimeScope;
-
         void OnEnable()
         {
             if (Application.isPlaying)
             {
                 Instance = this;
-
-                var activeScene = SceneManager.GetActiveScene();
-                if (activeScene.isLoaded)
-                {
-                    OnFirstSceneLoaded(activeScene, default);
-                }
-                else
-                {
-                    SceneManager.sceneLoaded -= OnFirstSceneLoaded;
-                    SceneManager.sceneLoaded += OnFirstSceneLoaded;
-                }
             }
         }
 
@@ -111,17 +73,6 @@ namespace VContainer.Unity
             Instance = null;
         }
 
-        void OnFirstSceneLoaded(Scene scene, LoadSceneMode mode)
-        {
-            if (RootLifetimeScope != null &&
-                RootLifetimeScope.autoRun &&
-                (rootLifetimeScopeInstance == null || rootLifetimeScopeInstance.Container == null))
-            {
-                GetOrCreateRootLifetimeScopeInstance();
-            }
-            SceneManager.sceneLoaded -= OnFirstSceneLoaded;
-        }
-        
         static void SetName(Object instance, Object prefab)
         {
             if (Instance != null && Instance.RemoveClonePostfix)

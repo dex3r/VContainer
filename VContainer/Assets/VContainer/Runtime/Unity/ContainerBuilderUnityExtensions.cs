@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using VContainer.Internal;
 
 #if VCONTAINER_ECS_INTEGRATION
@@ -140,10 +141,14 @@ namespace VContainer.Unity
             this IContainerBuilder builder,
             Type type)
         {
-            var lifetimeScope = (LifetimeScope)builder.ApplicationOrigin;
-            var scene = lifetimeScope.gameObject.scene;
+            Scene? scene = builder.Scene?.Scene;
 
-            var registrationBuilder = new ComponentRegistrationBuilder(scene, type);
+            if (!scene.HasValue)
+            {
+                throw new InvalidOperationException("Cannot register a component in hierarchy to a container without a scene.");
+            }
+
+            var registrationBuilder = new ComponentRegistrationBuilder(scene.Value, type);
             // Force inject execution
             builder.RegisterBuildCallback(
                 container =>
